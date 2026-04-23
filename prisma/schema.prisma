@@ -1,0 +1,166 @@
+// SLS-V2 data model
+//
+// Notes:
+// - SQLite for dev; swap provider to "postgresql" for prod.
+// - Files store a `storageKey` that the storage layer interprets.
+//   For the mock backend it's a local path; for SharePoint it will
+//   be the Graph driveItem id.
+// - Enums are represented as string columns for SQLite compatibility.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// --- Users / roles -----------------------------------------------------
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String
+  role      String   // "engineer" | "operator" | "admin"
+  createdAt DateTime @default(now())
+
+  jobsCreated       PrintJob[]         @relation("JobCreatedBy")
+  filesUploaded     StoredFile[]       @relation("FileUploadedBy")
+  stepsCompleted    PostProcessStep[]  @relation("StepCompletedBy")
+  failuresReported  FailureReport[]    @relation("FailureReportedBy")
+  agingLogs         MaterialAgingLog[] @relation("AgingRecordedBy")
+}
+
+// --- Materials --------------------------------------------------------
+
+model Material {
+  id        String   @id @default(cuid())
+  name      String
+  sku       String?
+  type      String   // e.g. "Nylon 12", "TPU", etc.
+  notes     String?
+  createdAt DateTime @default(now())
+
+  agingLogs MaterialAgingLog[]
+  jobs      PrintJob[]
+}
+
+model MaterialAgingLog {
+  id           String   @id @default(cuid())
+  materialId   String
+  material     Material @relation(fields: [materialId], references: [id], onDelete: Cascade)
+  recordedAt   DateTime @default(now())
+  hoursUsed    Float?
+  refreshRatio Float?   // e.g. 0.3 = 30% virgin powder mixed
+  notes        String?
+  recordedById String?
+  recordedBy   User?    @relation("AgingRecordedBy", fields: [recordedById], references: [id])
+  fileId       String?
+  file         StoredFile? @relation("AgingLogFile", fields: [fileId], references: [id])
+}
+
+// --- Print jobs -------------------------------------------------------
+
+model PrintJob {
+  id           String    @id @default(cuid())
+  name         String
+  description  String?
+  // "queued" | "printing" | "printed" | "post_processing" | "archived" | "failed"
+  status       String    @default("queued")
+  priority     Int       @default(3) // 1 (highest) .. 5 (lowest)
+
+  createdById  String
+  createdBy    User      @relation("JobCreatedBy", fields: [createdById], references: [id])
+  materialId   String?
+  material     Material? @relation(fields: [materialId], references: [id])
+
+  printerName  String?
+  quantity     Int       @default(1)
+  notes        String?
+
+  createdAt    DateTime  @default(now())
+  queuedAt     DateTime?
+  printedAt    DateTime?
+  archivedAt   DateTime?
+
+  files          StoredFile[]
+  postProcessSteps PostProcessStep[]
+  failures       FailureReport[]
+}
+
+// --- Files ------------------------------------------------------------
+
+model StoredFile {
+  id            String   @id @default(cuid())
+  // Logical category - drives where it shows up in the UI.
+  // "design_stl" | "design_3mf" | "preform_form" | "photo_raw"
+  // | "photo_processed" | "failure_doc" | "postprocess_doc"
+  // | "aging_log" | "other"
+  kind          String
+
+  name          String   // original filename
+  mimeType      String
+  sizeBytes     Int
+
+  // Opaque key for the storage backend. Mock: relative path on disk.
+  // SharePoint: Graph driveItem id.
+  storageKey    String
+
+  uploadedAt    DateTime @default(now())
+  uploadedById  String
+  uploadedBy    User     @relation("FileUploadedBy", fields: [uploadedById], references: [id])
+
+  jobId         String?
+  job           PrintJob? @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  // Reverse: used by MaterialAgingLog and FailureReport
+  agingLogs     MaterialAgingLog[] @relation("AgingLogFile")
+  failureReports FailureReport[]   @relation("FailureReportFile")
+
+  @@index([kind])
+  @@index([jobId])
+}
+
+// --- Post-processing --------------------------------------------------
+
+model PostProcessTemplate {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  // Ordered list of step names, JSON-serialized.
+  // e.g. ["Depowder", "Bead blast", "Tumble", "Dye"]
+  stepsJson String
+  createdAt DateTime @default(now())
+}
+
+model PostProcessStep {
+  id             String    @id @default(cuid())
+  jobId          String
+  job            PrintJob  @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  name           String
+  order          Int
+  completedAt    DateTime?
+  completedById  String?
+  completedBy    User?     @relation("StepCompletedBy", fields: [completedById], references: [id])
+  notes          String?
+
+  @@index([jobId, order])
+}
+
+// --- Failure reports --------------------------------------------------
+
+model FailureReport {
+  id             String   @id @default(cuid())
+  jobId          String
+  job            PrintJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  summary        String
+  // "machine" | "material" | "design" | "slice" | "post_process" | "other"
+  category       String
+  details        String?
+  createdAt      DateTime @default(now())
+  reportedById   String
+  reportedBy     User     @relation("FailureReportedBy", fields: [reportedById], references: [id])
+
+  fileId         String?
+  file           StoredFile? @relation("FailureReportFile", fields: [fileId], references: [id])
+}
